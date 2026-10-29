@@ -8,6 +8,7 @@ Your own tooling: JavaScript cells saved on disk and loaded into every JS eval s
 - Save a cell with `await write("<dir>/<name>.js", source)`. The next eval call reloads it; no restart.
 - `edit` and `search` ship as seeds. Save a cell with the same name to replace one.
 - `cells` and `toolInfo` are reserved: NEVER declare a top-level variable with either name; it hides them for the rest of the session.
+- History is opt-in: once `{{userDir}}` is its own git repository (`git init` there), every change to it is committed with the session id. Use `git log` and `git revert` there to inspect or undo a cell change.
 - Delete the file to forget a cell. A cell that fails to load is skipped and listed in `cells.failed` with its error.
 </instruction>
 {{#if cells.length}}

@@ -7,6 +7,7 @@ import { getAgentDir, getProjectAgentDir, prompt } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import organismGuidance from "../prompts/system/organism.md" with { type: "text" };
 import cellsDocumentation from "../prompts/tools/cells.md" with { type: "text" };
+import { createCellHistory } from "./history";
 import type { ToolSession } from "../tools";
 import { cfgToolsOrganism } from "../tools/settings";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
@@ -175,6 +176,24 @@ export function createCellsPrelude(
 	hostedTools: () => readonly AgentTool[] = () => [],
 ): EvalPreludeDefinition {
 	const dirs = () => resolveCellDirs(session.cwd);
+	const history = createCellHistory(
+		() => dirs().userDir,
+		() => session.getSessionId?.(),
+	);
+	// Fingerprint of the user folder's cells as of the last eval run; a change
+	// (written by the model, or by hand) schedules a history commit.
+	let userCellsFingerprint: string | undefined;
+	const trackUserCells = () => {
+		// Read the folder itself: a project cell of the same name hides a user cell from the merged set.
+		const fingerprint = Bun.hash(
+			readCellDir(dirs().userDir)
+				.map(cell => `${cell.file}\0${cell.source}`)
+				.join("\0"),
+		).toString(16);
+		if (fingerprint === userCellsFingerprint) return;
+		userCellsFingerprint = fingerprint;
+		void history.schedule();
+	};
 	const documentation = (cells: readonly Cell[]) =>
 		prompt.render(cellsDocumentation, {
 			...dirs(),
@@ -186,6 +205,7 @@ export function createCellsPrelude(
 			return documentation(loadCells(dirs()));
 		},
 		get javascript() {
+			trackUserCells();
 			return cellsJavascript(loadCells(dirs()));
 		},
 		python: "",
