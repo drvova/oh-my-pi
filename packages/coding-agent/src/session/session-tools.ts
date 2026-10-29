@@ -25,6 +25,7 @@ import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/conte
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
+import hostedToolsNoticePrompt from "../prompts/system/hosted-tools-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
@@ -311,6 +312,15 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
+/** Hidden notice announcing eval-hosted (organism-mode MCP/extension) tool changes. */
+const HOSTED_TOOLS_NOTICE_MESSAGE_TYPE = "hosted-tools-notice";
+
+/** Tool names added/removed by one hidden {@link HOSTED_TOOLS_NOTICE_MESSAGE_TYPE} message. */
+interface HostedToolsNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
 /** Agent pseudonyms added/removed by one hidden {@link SESSION_AGENT_NOTICE_TYPE} message. */
 interface SessionAgentNoticeDetails {
 	added: string[];
@@ -330,6 +340,8 @@ interface PromptSurface {
 	evalPreludes: readonly EvalPreludeDefinition[];
 	/** User-tagged model agents listed in the task description. */
 	sessionAgents: readonly AgentDefinition[];
+	/** Eval-hosted tool names listed in the organism guidance. */
+	hostedToolNames: readonly string[];
 }
 
 interface PendingNoticePreview<T> {
@@ -666,6 +678,7 @@ export class SessionTools {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
+			hostedToolNames: [...this.#evalHostedToolNames],
 		};
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -1891,6 +1904,44 @@ export class SessionTools {
 				removed,
 			}),
 			details: { added: added.map(agent => agent.name), removed },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/**
+	 * Builds the hidden notice reconciling the eval-hosted tools the model knows
+	 * with the live set. MCP servers usually connect after the first prompt is
+	 * built, and hosted tools never enter the tool schema, so without this the
+	 * model only finds them by calling `toolInfo()`.
+	 *
+	 * Known tools are the committed base snapshot, then every hosted-tools notice
+	 * still in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 */
+	takeHostedToolsNotice(): CustomMessage<HostedToolsNoticeDetails> | undefined {
+		const known = new Set(this.#promptSurface.hostedToolNames);
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== HOSTED_TOOLS_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const added = [...this.#evalHostedToolNames].filter(name => !known.has(name));
+		const removed = [...known].filter(name => !this.#evalHostedToolNames.has(name));
+		if (added.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: HOSTED_TOOLS_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(hostedToolsNoticePrompt, {
+				added: added.map(name => ({
+					name,
+					summary: this.#toolRegistry.get(name)?.description.trim().split("\n", 1)[0] ?? "",
+				})),
+				removed,
+			}),
+			details: { added, removed },
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),
