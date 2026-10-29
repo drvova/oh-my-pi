@@ -11,6 +11,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CustomTool, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { checkPythonKernelAvailability } from "../src/eval/py/kernel";
+
+const pythonKernel = await checkPythonKernelAvailability(process.cwd());
 
 const echoParameters = type({ text: "string" });
 const echoTool: CustomTool<typeof echoParameters> = {
@@ -55,13 +58,14 @@ describe("organism mode", () => {
 		tempDir: string,
 		xdev = true,
 		model = getBundledModel("openai", "gpt-4o-mini"),
+		evalPy = false,
 	) =>
 		createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(tempDir),
-			settings: Settings.isolated({ "tools.organism": true, "tools.xdev": xdev, "eval.py": false }),
+			settings: Settings.isolated({ "tools.organism": true, "tools.xdev": xdev, "eval.py": evalPy }),
 			model,
 			disableExtensionDiscovery: true,
 			customTools: [echoTool],
@@ -178,6 +182,25 @@ describe("organism mode", () => {
 			// Announced once: the notice persists in the transcript instead of repeating.
 			expect(requestText(third!).split("Eval-hosted tools changed").length - 1).toBe(1);
 			expect(requestText(fourth!)).toContain("No longer available; calls fail:\n- `mcp__docs_query`");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it.skipIf(!pythonKernel.ok)("loads Python cells and reaches hosted tools from the Python kernel", async () => {
+		const tempDir = makeTempDir();
+		await Bun.write(
+			path.join(tempDir, ".omp", "cells", "double.py"),
+			"# Doubles\ndef double(n):\n    return n * 2\n",
+		);
+		const { session } = await createOrganismSession(tempDir, true, undefined, true);
+		try {
+			const result = await session.getToolByName("eval")!.execute("organism-py", {
+				language: "py",
+				code: "print(cells.double(21), (await toolInfo())[0]['name'], await tool.echo_remote({'text': 'py'}))",
+			});
+			const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(text).toContain("42 echo_remote echo:py");
 		} finally {
 			await session.dispose();
 		}

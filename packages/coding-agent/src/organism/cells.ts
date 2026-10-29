@@ -15,10 +15,14 @@ import editSeed from "./seeds/edit.js" with { type: "text" };
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import searchSeed from "./seeds/search.js" with { type: "text" };
 
-/** A model-written helper loaded into JavaScript eval as `cells.<name>`. */
+/** Eval language a cell loads into, from its file extension. */
+export type CellLanguage = "js" | "py";
+
+/** A model-written helper loaded into its language's eval kernel as `cells.<name>`. */
 export interface Cell {
 	name: string;
-	/** First leading `//` comment line, shown in the index. */
+	language: CellLanguage;
+	/** First leading comment line (`//` or `#`), shown in the index. */
 	summary: string | undefined;
 	source: string;
 	/** Path on disk, or `seed:<name>` for a bundled seed. */
@@ -29,7 +33,13 @@ export interface Cell {
 export const SEED_CELLS: readonly Cell[] = Object.entries({
 	edit: editSeed as string,
 	search: searchSeed as string,
-}).map(([name, source]) => ({ name, summary: cellSummary(source), source, file: `seed:${name}` }));
+}).map(([name, source]) => ({
+	name,
+	language: "js",
+	summary: cellSummary(source, "js"),
+	source,
+	file: `seed:${name}`,
+}));
 
 /** Directories cells load from, lowest precedence first. */
 export interface CellDirs {
@@ -37,7 +47,9 @@ export interface CellDirs {
 	projectDir: string;
 }
 
-const CELL_NAME = /^[A-Za-z_$][\w$]*$/;
+/** Valid `cells.<name>` identifiers per language. */
+const CELL_NAME: Record<CellLanguage, RegExp> = { js: /^[A-Za-z_$][\w$]*$/, py: /^[A-Za-z_]\w*$/ };
+const CELL_EXTENSION = /\.(js|py)$/;
 /** `cells.failed` holds load errors, so no cell may claim the name. */
 const RESERVED_CELL_NAMES = new Set(["failed"]);
 
@@ -48,8 +60,8 @@ export function resolveCellDirs(cwd: string): CellDirs {
 	};
 }
 
-function cellSummary(source: string): string | undefined {
-	const first = /^\s*\/\/(.*)/.exec(source);
+function cellSummary(source: string, language: CellLanguage): string | undefined {
+	const first = (language === "js" ? /^\s*\/\/(.*)/ : /^\s*#(?!!)(.*)/).exec(source);
 	const summary = first?.[1]?.trim();
 	return summary || undefined;
 }
@@ -70,9 +82,11 @@ function readCellDir(dir: string): Cell[] {
 	}
 	const cells: Cell[] = [];
 	for (const entry of entries.sort()) {
-		if (!entry.endsWith(".js")) continue;
+		const extension = CELL_EXTENSION.exec(entry);
+		if (!extension) continue;
+		const language = extension[1] as CellLanguage;
 		const name = entry.slice(0, -3);
-		if (!CELL_NAME.test(name) || RESERVED_CELL_NAMES.has(name)) continue;
+		if (!CELL_NAME[language].test(name) || RESERVED_CELL_NAMES.has(name)) continue;
 		const file = path.join(dir, entry);
 		try {
 			const stat = fs.statSync(file);
@@ -82,7 +96,7 @@ function readCellDir(dir: string): Cell[] {
 				continue;
 			}
 			const source = fs.readFileSync(file, "utf8");
-			const cell = { name, summary: cellSummary(source), source, file };
+			const cell: Cell = { name, language, summary: cellSummary(source, language), source, file };
 			cellFileCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, cell });
 			cells.push(cell);
 		} catch {
@@ -101,11 +115,12 @@ function readCellDir(dir: string): Cell[] {
  * available on the next call without a restart.
  */
 export function loadCells(dirs: CellDirs, seeds: readonly Cell[] = SEED_CELLS): Cell[] {
-	const byName = new Map<string, Cell>();
-	for (const cell of seeds) byName.set(cell.name, cell);
-	for (const cell of readCellDir(dirs.userDir)) byName.set(cell.name, cell);
-	for (const cell of readCellDir(dirs.projectDir)) byName.set(cell.name, cell);
-	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+	// Each language has its own `cells` namespace, so `edit.js` and `edit.py` coexist.
+	const byKey = new Map<string, Cell>();
+	for (const cell of [...seeds, ...readCellDir(dirs.userDir), ...readCellDir(dirs.projectDir)]) {
+		byKey.set(`${cell.language}\0${cell.name}`, cell);
+	}
+	return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name) || a.language.localeCompare(b.language));
 }
 
 /**
@@ -115,6 +130,7 @@ export function loadCells(dirs: CellDirs, seeds: readonly Cell[] = SEED_CELLS): 
  */
 export function cellsJavascript(cells: readonly Cell[]): string {
 	const defines = cells
+		.filter(cell => cell.language === "js")
 		.map(cell => `\tdefine(${JSON.stringify(cell.name)}, ${JSON.stringify(cell.source)});`)
 		.join("\n");
 	return `{
@@ -136,6 +152,51 @@ ${defines}
 		return response && typeof response === "object" ? response.details : undefined;
 	};
 }`;
+}
+
+/**
+ * Python that installs `cells` and `toolInfo` in the Python kernel. Each cell
+ * module runs in its own copy of the kernel globals, so it sees every eval
+ * helper without leaking its own top-level names; a cell that raises is
+ * recorded in `cells.failed` instead of breaking eval.
+ */
+export function cellsPython(cells: readonly Cell[]): string {
+	// JSON string literals are valid Python string literals.
+	const entries = cells
+		.filter(cell => cell.language === "py")
+		.map(cell => `        (${JSON.stringify(cell.name)}, ${JSON.stringify(cell.source)}),`)
+		.join("\n");
+	return `def _omp_make_cells():
+    import types
+    cells = types.SimpleNamespace()
+    failed = {}
+    base = dict(globals())
+    for name, source in [
+${entries}
+    ]:
+        namespace = dict(base)
+        namespace["__name__"] = "cell_" + name
+        try:
+            exec(compile(source, "<cell " + name + ">", "exec"), namespace)
+            if name not in namespace:
+                raise NameError("cell must define " + name)
+            setattr(cells, name, namespace[name])
+        except Exception as error:
+            failed[name] = type(error).__name__ + ": " + str(error)
+    cells.failed = failed
+    return cells
+
+
+cells = _omp_make_cells()
+del _omp_make_cells
+
+
+async def toolInfo(name=None):
+    if name is not None and not isinstance(name, str):
+        raise TypeError("toolInfo() expects a tool name or nothing")
+    response = await _omp_prelude("cells", {} if name is None else {"name": name})
+    return response.get("details") if isinstance(response, dict) else None
+`;
 }
 
 /** One eval-hosted tool as `toolInfo()` reports it. */
@@ -197,7 +258,7 @@ export function createCellsPrelude(
 	const documentation = (cells: readonly Cell[]) =>
 		prompt.render(cellsDocumentation, {
 			...dirs(),
-			cells: cells.map(({ name, summary }) => ({ name, summary })),
+			cells: cells.map(({ name, language, summary }) => ({ name, py: language === "py", summary })),
 		});
 	return {
 		name: "cells",
@@ -208,7 +269,10 @@ export function createCellsPrelude(
 			trackUserCells();
 			return cellsJavascript(loadCells(dirs()));
 		},
-		python: "",
+		get python() {
+			trackUserCells();
+			return cellsPython(loadCells(dirs()));
+		},
 		exports: ["cells", "toolInfo"],
 		approval: "read",
 		get guidance() {
