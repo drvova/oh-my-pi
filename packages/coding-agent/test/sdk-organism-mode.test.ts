@@ -1,0 +1,113 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type CustomTool, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+
+const echoParameters = type({ text: "string" });
+const echoTool: CustomTool<typeof echoParameters> = {
+	name: "echo_remote",
+	label: "Echo Remote",
+	description: "Echoes its input like a remote MCP tool.\nSecond line stays out of the index.",
+	parameters: echoParameters,
+	async execute(_id, params) {
+		return { content: [{ type: "text", text: `echo:${params.text}` }] };
+	},
+};
+
+describe("organism mode", () => {
+	const tempDirs: string[] = [];
+	let modelRegistry!: ModelRegistry;
+	let authDir: string;
+
+	const makeTempDir = (): string => {
+		const dir = path.join(os.tmpdir(), `pi-organism-${Snowflake.next()}`);
+		tempDirs.push(dir);
+		fs.mkdirSync(dir, { recursive: true });
+		return dir;
+	};
+
+	beforeAll(async () => {
+		authDir = makeTempDir();
+		modelRegistry = new ModelRegistry(await discoverAuthStorage(authDir));
+	});
+
+	afterEach(() => {
+		for (const dir of tempDirs.splice(1)) removeSyncWithRetries(dir);
+	});
+
+	afterAll(() => {
+		modelRegistry.authStorage.close();
+		for (const dir of tempDirs.splice(0)) removeSyncWithRetries(dir);
+	});
+
+	// xd:// on and off take different built-in provenance paths in the SDK.
+	it.each([true, false])("exposes only eval and hosts custom tools behind eval's bridge (xdev %p)", async xdev => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.organism": true, "tools.xdev": xdev, "eval.py": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			customTools: [echoTool],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			rules: [],
+			workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+		});
+		try {
+			expect(session.getActiveToolNames()).toEqual(["eval"]);
+			expect(session.getEvalBridgeToolNames()).toContain("echo_remote");
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain("`echo_remote`: Echoes its input like a remote MCP tool.");
+			expect(prompt).not.toContain("Second line stays out of the index.");
+
+			const evalTool = session.getToolByName("eval");
+			const result = await evalTool!.execute("organism-call", {
+				language: "js",
+				code: [
+					'const schema = await tools("echo_remote");',
+					'const reply = await tool.echo_remote({ text: "hi" });',
+					"print(JSON.stringify({ listed: (await tools()).map(t => t.name), required: schema.parameters.required, reply }));",
+				].join("\n"),
+			});
+			const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(text).toContain('"listed":["echo_remote"]');
+			expect(text).toContain('"required":["text"]');
+			expect(text).toContain("echo:hi");
+
+			// MCP tools discovered after startup are hosted too, even ones that would otherwise stay top-level.
+			await session.refreshMCPTools([
+				{
+					name: "mcp__docs_query",
+					label: "mcp__docs_query",
+					description: "Query docs",
+					parameters: type({}),
+					loadMode: "essential",
+					mcpServerName: "docs",
+					mcpToolName: "query",
+					async execute() {
+						return { content: [{ type: "text", text: "docs" }] };
+					},
+				},
+			]);
+			expect(session.getActiveToolNames()).toEqual(["eval"]);
+			expect(session.getEvalBridgeToolNames()).toEqual(expect.arrayContaining(["echo_remote", "mcp__docs_query"]));
+		} finally {
+			await session.dispose();
+		}
+	});
+});

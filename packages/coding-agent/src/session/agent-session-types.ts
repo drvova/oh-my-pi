@@ -340,6 +340,8 @@ export interface AgentSessionConfig {
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
 	xdev?: XdevState;
+	/** Shared set of eval-hosted tool names (organism mode); see `isEvalHostedTool`. */
+	evalHostedToolNames?: Set<string>;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** Accessor for live MCP server instructions. */

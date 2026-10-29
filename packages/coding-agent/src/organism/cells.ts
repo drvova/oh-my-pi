@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getAgentDir, getProjectAgentDir, prompt } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -101,14 +103,51 @@ export function cellsJavascript(cells: readonly Cell[]): string {
 ${defines}
 	Object.defineProperty(cells, "failed", { value: Object.freeze(failed), enumerable: false });
 	globalThis.cells = cells;
+	globalThis.tools = async name => {
+		if (name !== undefined && typeof name !== "string") throw new TypeError("tools() expects a tool name or nothing");
+		const response = await globalThis.__omp_prelude__("cells", name === undefined ? {} : { name });
+		return response && typeof response === "object" ? response.details : undefined;
+	};
 }`;
+}
+
+/** One eval-hosted tool as `tools()` reports it. */
+export interface HostedToolInfo {
+	name: string;
+	/** First description line. */
+	summary: string;
+	description?: string;
+	/** JSON schema of the `args` object `tool.<name>(args)` takes. */
+	parameters?: Record<string, unknown>;
+}
+
+function hostedToolInfo(tool: AgentTool, full: boolean): HostedToolInfo {
+	const summary = tool.description.trim().split("\n", 1)[0] ?? "";
+	if (!full) return { name: tool.name, summary };
+	return { name: tool.name, summary, description: tool.description, parameters: toolWireSchema(tool) };
+}
+
+function hostedToolsResult(tools: readonly AgentTool[], name: string | undefined) {
+	if (name === undefined) {
+		const list = tools.map(tool => hostedToolInfo(tool, false));
+		const text = list.map(info => `${info.name}: ${info.summary}`).join("\n") || "No hosted tools";
+		return { content: [{ type: "text" as const, text }], details: list };
+	}
+	const tool = tools.find(candidate => candidate.name === name);
+	if (!tool) throw new ToolError(`No hosted tool named ${name}; call tools() for the list`);
+	const info = hostedToolInfo(tool, true);
+	return { content: [{ type: "text" as const, text: JSON.stringify(info.parameters) }], details: info };
 }
 
 /**
  * Organism-mode prelude: the model's saved cells, re-read from disk on every
- * eval run, plus the system-prompt block that tells it eval is its only tool.
+ * eval run, `tools()` for discovering eval-hosted (MCP, extension) tools, and
+ * the system-prompt block that tells it eval is its only tool.
  */
-export function createCellsPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createCellsPrelude(
+	session: ToolSession,
+	hostedTools: () => readonly AgentTool[] = () => [],
+): EvalPreludeDefinition {
 	const dirs = () => resolveCellDirs(session.cwd);
 	const documentation = (cells: readonly Cell[]) =>
 		prompt.render(cellsDocumentation, {
@@ -124,14 +163,23 @@ export function createCellsPrelude(session: ToolSession): EvalPreludeDefinition 
 			return cellsJavascript(loadCells(dirs()));
 		},
 		python: "",
-		exports: ["cells"],
+		exports: ["cells", "tools"],
+		approval: "read",
 		get guidance() {
 			const cells = loadCells(dirs());
-			return prompt.render(organismGuidance, { contract: documentation(cells), cells });
+			return prompt.render(organismGuidance, {
+				contract: documentation(cells),
+				cells,
+				hosted: hostedTools().map(tool => hostedToolInfo(tool, false)),
+			});
 		},
 		enabled: () => cfgToolsOrganism.get(session.settings) === true,
-		invoke: async () => {
-			throw new ToolError("cells has no host calls; call cells.<name>(…) directly");
+		invoke: async parameters => {
+			const name =
+				parameters !== null && typeof parameters === "object" && "name" in parameters
+					? String(parameters.name)
+					: undefined;
+			return hostedToolsResult(hostedTools(), name);
 		},
 	};
 }

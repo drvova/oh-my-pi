@@ -2448,6 +2448,7 @@ export class AgentSession implements SettingsScope {
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
+			evalHostedToolNames: config.evalHostedToolNames,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
