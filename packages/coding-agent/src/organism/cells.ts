@@ -9,6 +9,10 @@ import organismGuidance from "../prompts/system/organism.md" with { type: "text"
 import cellsDocumentation from "../prompts/tools/cells.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { cfgToolsOrganism } from "../tools/settings";
+// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
+import editSeed from "./seeds/edit.js" with { type: "text" };
+// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
+import searchSeed from "./seeds/search.js" with { type: "text" };
 
 /** A model-written helper loaded into JavaScript eval as `cells.<name>`. */
 export interface Cell {
@@ -16,8 +20,15 @@ export interface Cell {
 	/** First leading `//` comment line, shown in the index. */
 	summary: string | undefined;
 	source: string;
+	/** Path on disk, or `seed:<name>` for a bundled seed. */
 	file: string;
 }
+
+/** Bundled starter cells, lowest precedence: any saved cell of the same name replaces one. */
+export const SEED_CELLS: readonly Cell[] = Object.entries({
+	edit: editSeed as string,
+	search: searchSeed as string,
+}).map(([name, source]) => ({ name, summary: cellSummary(source), source, file: `seed:${name}` }));
 
 /** Directories cells load from, lowest precedence first. */
 export interface CellDirs {
@@ -42,6 +53,12 @@ function cellSummary(source: string): string | undefined {
 	return summary || undefined;
 }
 
+/**
+ * Parsed cells keyed by path, reused while mtime and size match. Cell sources
+ * are rebuilt on every eval run, so only changed files are read again.
+ */
+const cellFileCache = new Map<string, { mtimeMs: number; size: number; cell: Cell }>();
+
 /** Read one directory's cells; a missing directory has none. */
 function readCellDir(dir: string): Cell[] {
 	let entries: string[];
@@ -56,26 +73,35 @@ function readCellDir(dir: string): Cell[] {
 		const name = entry.slice(0, -3);
 		if (!CELL_NAME.test(name) || RESERVED_CELL_NAMES.has(name)) continue;
 		const file = path.join(dir, entry);
-		let source: string;
 		try {
-			source = fs.readFileSync(file, "utf8");
+			const stat = fs.statSync(file);
+			const cached = cellFileCache.get(file);
+			if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+				cells.push(cached.cell);
+				continue;
+			}
+			const source = fs.readFileSync(file, "utf8");
+			const cell = { name, summary: cellSummary(source), source, file };
+			cellFileCache.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, cell });
+			cells.push(cell);
 		} catch {
-			continue;
+			cellFileCache.delete(file);
 		}
-		cells.push({ name, summary: cellSummary(source), source, file });
 	}
 	return cells;
 }
 
 /**
- * Load every cell, project cells replacing user cells of the same name.
+ * Load every cell: seeds, then user cells, then project cells, each replacing
+ * an earlier cell of the same name.
  *
  * Synchronous because a prelude's JavaScript source is read synchronously on
  * every eval run; that per-run read is what makes a freshly written cell
  * available on the next call without a restart.
  */
-export function loadCells(dirs: CellDirs): Cell[] {
+export function loadCells(dirs: CellDirs, seeds: readonly Cell[] = SEED_CELLS): Cell[] {
 	const byName = new Map<string, Cell>();
+	for (const cell of seeds) byName.set(cell.name, cell);
 	for (const cell of readCellDir(dirs.userDir)) byName.set(cell.name, cell);
 	for (const cell of readCellDir(dirs.projectDir)) byName.set(cell.name, cell);
 	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -103,15 +129,15 @@ export function cellsJavascript(cells: readonly Cell[]): string {
 ${defines}
 	Object.defineProperty(cells, "failed", { value: Object.freeze(failed), enumerable: false });
 	globalThis.cells = cells;
-	globalThis.tools = async name => {
-		if (name !== undefined && typeof name !== "string") throw new TypeError("tools() expects a tool name or nothing");
+	globalThis.toolInfo = async name => {
+		if (name !== undefined && typeof name !== "string") throw new TypeError("toolInfo() expects a tool name or nothing");
 		const response = await globalThis.__omp_prelude__("cells", name === undefined ? {} : { name });
 		return response && typeof response === "object" ? response.details : undefined;
 	};
 }`;
 }
 
-/** One eval-hosted tool as `tools()` reports it. */
+/** One eval-hosted tool as `toolInfo()` reports it. */
 export interface HostedToolInfo {
 	name: string;
 	/** First description line. */
@@ -134,14 +160,14 @@ function hostedToolsResult(tools: readonly AgentTool[], name: string | undefined
 		return { content: [{ type: "text" as const, text }], details: list };
 	}
 	const tool = tools.find(candidate => candidate.name === name);
-	if (!tool) throw new ToolError(`No hosted tool named ${name}; call tools() for the list`);
+	if (!tool) throw new ToolError(`No hosted tool named ${name}; call toolInfo() for the list`);
 	const info = hostedToolInfo(tool, true);
 	return { content: [{ type: "text" as const, text: JSON.stringify(info.parameters) }], details: info };
 }
 
 /**
  * Organism-mode prelude: the model's saved cells, re-read from disk on every
- * eval run, `tools()` for discovering eval-hosted (MCP, extension) tools, and
+ * eval run, `toolInfo()` for discovering eval-hosted (MCP, extension) tools, and
  * the system-prompt block that tells it eval is its only tool.
  */
 export function createCellsPrelude(
@@ -163,7 +189,7 @@ export function createCellsPrelude(
 			return cellsJavascript(loadCells(dirs()));
 		},
 		python: "",
-		exports: ["cells", "tools"],
+		exports: ["cells", "toolInfo"],
 		approval: "read",
 		get guidance() {
 			const cells = loadCells(dirs());

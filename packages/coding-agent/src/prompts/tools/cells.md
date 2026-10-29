@@ -6,6 +6,8 @@ Your own tooling: JavaScript cells saved on disk and loaded into every JS eval s
 - Start the file with `//` comment lines: the first line is the summary shown in the index, the rest is usage.
 - Cells see every eval global (`read`, `write`, `print`, `Bun`, `tool`, other `cells.*`).
 - Save a cell with `await write("<dir>/<name>.js", source)`. The next eval call reloads it; no restart.
+- `edit` and `search` ship as seeds. Save a cell with the same name to replace one.
+- `cells` and `toolInfo` are reserved: NEVER declare a top-level variable with either name; it hides them for the rest of the session.
 - Delete the file to forget a cell. A cell that fails to load is skipped and listed in `cells.failed` with its error.
 </instruction>
 {{#if cells.length}}

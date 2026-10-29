@@ -12,7 +12,7 @@ function install(source: string): Record<string, unknown> & { failed: Record<str
 }
 
 describe("organism cells", () => {
-	it("loads saved cells, lets project cells override user cells, and isolates broken cells", async () => {
+	it("layers seed < user < project cells, isolates broken cells, and reloads rewritten ones", async () => {
 		await using dir = await TempDir.create(path.join(os.tmpdir(), "omp-cells-"));
 		const dirs = { userDir: dir.join("user"), projectDir: dir.join("project") };
 		await Bun.write(
@@ -24,7 +24,13 @@ describe("organism cells", () => {
 		await Bun.write(path.join(dirs.userDir, "broken.js"), "function notBroken() {}");
 		await Bun.write(path.join(dirs.userDir, "not-an-identifier.js"), "const x = 1;");
 
-		const cells = loadCells(dirs);
+		const seed = {
+			name: "greet",
+			summary: "Seed greet",
+			source: "function greet() { return 'seed'; }",
+			file: "seed:greet",
+		};
+		const cells = loadCells(dirs, [seed]);
 		expect(cells.map(cell => [cell.name, cell.summary])).toEqual([
 			["broken", undefined],
 			["greet", "Greets someone"],
@@ -36,5 +42,9 @@ describe("organism cells", () => {
 		expect((installed.shout as (s: string) => string)("x")).toBe("X");
 		expect(installed.broken).toBeUndefined();
 		expect(installed.failed.broken).toContain("broken");
+
+		// A rewritten cell is picked up on the next load despite the read cache.
+		await Bun.write(path.join(dirs.projectDir, "shout.js"), "// Louder\nconst shout = s => s.toUpperCase() + '!';");
+		expect(loadCells(dirs, [seed]).find(cell => cell.name === "shout")?.summary).toBe("Louder");
 	});
 });

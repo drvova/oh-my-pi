@@ -54,7 +54,7 @@ describe("organism mode", () => {
 			cwd: tempDir,
 			agentDir: tempDir,
 			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager: SessionManager.inMemory(tempDir),
 			settings: Settings.isolated({ "tools.organism": true, "tools.xdev": xdev, "eval.py": false }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
@@ -79,15 +79,33 @@ describe("organism mode", () => {
 			const result = await evalTool!.execute("organism-call", {
 				language: "js",
 				code: [
-					'const schema = await tools("echo_remote");',
+					'const schema = await toolInfo("echo_remote");',
 					'const reply = await tool.echo_remote({ text: "hi" });',
-					"print(JSON.stringify({ listed: (await tools()).map(t => t.name), required: schema.parameters.required, reply }));",
+					"print(JSON.stringify({ listed: (await toolInfo()).map(t => t.name), required: schema.parameters.required, reply }));",
 				].join("\n"),
 			});
 			const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("");
 			expect(text).toContain('"listed":["echo_remote"]');
 			expect(text).toContain('"required":["text"]');
 			expect(text).toContain("echo:hi");
+
+			// Seed cells load into the real eval realm and keep their exact-match contract.
+			await Bun.write(path.join(tempDir, "notes.txt"), "one two two");
+			const editRun = await evalTool!.execute("organism-edit", {
+				language: "js",
+				code: [
+					'const once = await cells.edit("notes.txt", "one", "1");',
+					'let ambiguous = "";',
+					'try { await cells.edit("notes.txt", "two", "2"); } catch (error) { ambiguous = error.message; }',
+					'const hits = await cells.search("two", { glob: "*.txt" });',
+					"print(JSON.stringify({ once, ambiguous, hits }));",
+				].join("\n"),
+			});
+			const editText = editRun.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(editText).toContain('"replaced":1');
+			expect(editText).toContain("occurs 2 times");
+			expect(editText).toContain('"hits":[{"file":"notes.txt","line":1,"text":"1 two two"}]');
+			expect(await Bun.file(path.join(tempDir, "notes.txt")).text()).toBe("1 two two");
 
 			// MCP tools discovered after startup are hosted too, even ones that would otherwise stay top-level.
 			await session.refreshMCPTools([
