@@ -632,6 +632,7 @@ tools:
 | `tools.xdevDocs` | enum | `catalog` | `inline` includes all mounted docs/schemas, `builtins` inlines built-ins only, `catalog` lists devices with docs fetched on demand. |
 | `tools.xdevInlineDevices` | array | `[]` | Dynamic-device name globs to inline in `builtins` mode; ignored in `catalog` mode. |
 | `tools.xdevNotices` | boolean | `true` | Show the `xd://: mounted …` / `unmounted …` notice when MCP or extension tools mount or unmount. Off hides only the notice; the model still learns of the change with its next prompt. `startup.quiet: true` also hides it. |
+| `tools.organism` | boolean | `false` | Expose only `eval`. The model builds its own tooling as JavaScript cells: `<name>.js` files in `~/.omp/agent/cells/` (all projects) or `.omp/cells/` (this project, wins on a name clash), loaded into every JS eval as `cells.<name>` and listed in the system prompt. A cell that fails to load is skipped and reported in `cells.failed`. `yield` and `goal` stay available as session protocol. |
 | `async.enabled` | boolean | `true` | Enable async bash commands and background task execution. |
 | `async.maxJobs` | number | `100` | Running background-job cap, floored to at least 1; parked/queued jobs do not consume execution slots. |
 | `async.printWake` | boolean | `false` | Print mode (`-p`, `--mode json`) waits for the run's background jobs instead of cancelling them at exit, and starts another turn in the same session with each result; same as `--wait-async`. |

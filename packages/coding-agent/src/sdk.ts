@@ -300,6 +300,7 @@ import { createModelJobWidgetAuthor, type JobWidgetAuthor, JobWidgets, resolveTo
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
+import { createCellsPrelude } from "./organism/cells";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
 import { ToolContextStore } from "./tools/context";
@@ -328,6 +329,7 @@ import {
 	cfgAsyncWidgets,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
+	cfgToolsOrganism,
 	cfgGenerateImageEnabled,
 	cfgSecurityEnabled,
 	cfgSpeechgenEnabled,
@@ -2561,6 +2563,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
 		let archivePrelude: EvalPreludeDefinition | undefined;
+		let cellsPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2579,6 +2582,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgArchiveEnabled.get(settings)) {
 				archivePrelude ??= createArchivePrelude(toolSession);
 				builtins.push(archivePrelude);
+			}
+			if (cfgToolsOrganism.get(settings)) {
+				cellsPrelude ??= createCellsPrelude(toolSession);
+				builtins.push(cellsPrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
