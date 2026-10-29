@@ -92,6 +92,7 @@ import {
 	cfgLaunchEnabled,
 	cfgSecurityEnabled,
 	cfgTodoEnabled,
+	cfgToolsOrganism,
 	cfgToolsXdev,
 	cfgWebSearchEnabled,
 } from "./settings";
@@ -739,7 +740,11 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			}
 		}
 	}
+	// Organism mode: eval is the only tool; the model grows the rest as cells.
+	// Yield and goal stay because they are session protocol, not tooling.
+	const organism = cfgToolsOrganism.get(session.settings);
 	const isToolAllowed = (name: string) => {
+		if (organism && name !== "eval" && name !== "yield" && name !== "goal") return false;
 		// Never in the default set. Explicitly activatable while goal.enabled and
 		// no goal record exists yet — /guided-goal enables it so the agent can
 		// finish the interview with `goal create`, which turns goal mode on. Once

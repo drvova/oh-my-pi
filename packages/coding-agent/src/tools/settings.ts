@@ -1009,6 +1009,19 @@ export const cfgToolsXdev = register({
 	},
 });
 
+export const cfgToolsOrganism = register({
+	id: "tools.organism",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Organism Mode",
+		description:
+			"Expose only the eval tool. The model builds the rest of its tooling as JavaScript cells saved under ~/.omp/agent/cells (or .omp/cells in the project), which load into every eval session as `cells.<name>`",
+	},
+});
+
 export const cfgToolsXdevDocs = register({
 	id: "tools.xdevDocs",
 	type: "enum",
@@ -1131,6 +1144,7 @@ export const cfgBuiltinToolGates = combine({
 	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
+	organism: cfgToolsOrganism,
 	security: cfgSecurityEnabled,
 	taskMaxRecursionDepth: cfgTaskMaxRecursionDepth,
 	todo: cfgTodoEnabled,

@@ -25,6 +25,7 @@ import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/conte
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
+import hostedToolsNoticePrompt from "../prompts/system/hosted-tools-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
@@ -42,6 +43,7 @@ import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { organismPlacement } from "../organism/hosted";
 import {
 	isMountableUnderXdev,
 	listXdevTools,
@@ -176,6 +178,8 @@ interface SessionToolsOptions {
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
+	/** Shared set of eval-hosted names: enabled for eval's tool bridge, absent from the top-level schema. */
+	evalHostedToolNames?: Set<string>;
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	baseSystemPrompt: string[];
 	skills?: Skill[];
@@ -308,6 +312,15 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
+/** Hidden notice announcing eval-hosted (organism-mode MCP/extension) tool changes. */
+const HOSTED_TOOLS_NOTICE_MESSAGE_TYPE = "hosted-tools-notice";
+
+/** Tool names added/removed by one hidden {@link HOSTED_TOOLS_NOTICE_MESSAGE_TYPE} message. */
+interface HostedToolsNoticeDetails {
+	added: string[];
+	removed: string[];
+}
+
 /** Agent pseudonyms added/removed by one hidden {@link SESSION_AGENT_NOTICE_TYPE} message. */
 interface SessionAgentNoticeDetails {
 	added: string[];
@@ -327,6 +340,8 @@ interface PromptSurface {
 	evalPreludes: readonly EvalPreludeDefinition[];
 	/** User-tagged model agents listed in the task description. */
 	sessionAgents: readonly AgentDefinition[];
+	/** Eval-hosted tool names listed in the organism guidance. */
+	hostedToolNames: readonly string[];
 }
 
 interface PendingNoticePreview<T> {
@@ -358,6 +373,7 @@ export class SessionTools {
 	#mcpManagerToolNames = new Set<string>();
 	#extensionMcpTools = new Map<string, AgentTool>();
 	#xdev: XdevState | undefined;
+	#evalHostedToolNames: Set<string>;
 	#pendingToolRosterDelta: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingToolRosterDeltaAfterBase: { added: Set<string>; removed: Set<string> } | undefined;
 	#pendingXdevMountDelta: { added: Set<string>; removed: Set<string> } | undefined;
@@ -509,6 +525,7 @@ export class SessionTools {
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
+		this.#evalHostedToolNames = options.evalHostedToolNames ?? new Set();
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
 		}
@@ -534,6 +551,7 @@ export class SessionTools {
 		// no tools and the prompt rebuild without `read` empties the skill list.
 		for (const tool of host.agent.state.tools) this.#enabledToolNames.add(tool.name);
 		for (const name of this.#xdev?.mountedNames ?? []) this.#enabledToolNames.add(name);
+		for (const name of this.#evalHostedToolNames) this.#enabledToolNames.add(name);
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 	}
@@ -660,6 +678,7 @@ export class SessionTools {
 			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
+			hostedToolNames: [...this.#evalHostedToolNames],
 		};
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -1306,8 +1325,17 @@ export class SessionTools {
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
+		const hostedNames = new Set<string>();
+		const droppedNames = new Set<string>();
+		for (const { name } of selectedTools) {
+			const placement = organismPlacement(this.#host.settings, name, this.#builtInToolNames.has(name));
+			if (placement === "hosted") hostedNames.add(name);
+			else if (placement === "dropped") droppedNames.add(name);
+		}
 		const mountCandidates = selectedTools.filter(
 			({ name, tool }) =>
+				!hostedNames.has(name) &&
+				!droppedNames.has(name) &&
 				this.#xdev !== undefined &&
 				xdevReadAvailable &&
 				xdevWriteAvailable &&
@@ -1318,7 +1346,7 @@ export class SessionTools {
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
-			if (mountNames.has(name)) continue;
+			if (mountNames.has(name) || hostedNames.has(name) || droppedNames.has(name)) continue;
 			tools.push(this.#wrapToolForAcpPermission(tool));
 			validToolNames.push(name);
 		}
@@ -1367,7 +1395,9 @@ export class SessionTools {
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
 		const previousEnabledToolNames = this.#enabledToolNames;
-		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
+		this.#enabledToolNames = new Set([...validToolNames, ...mountNames, ...hostedNames]);
+		this.#evalHostedToolNames.clear();
+		for (const name of hostedNames) this.#evalHostedToolNames.add(name);
 		this.#setMountedNames(mountNames);
 		this.#setActiveToolNames?.(validToolNames);
 
@@ -1874,6 +1904,44 @@ export class SessionTools {
 				removed,
 			}),
 			details: { added: added.map(agent => agent.name), removed },
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
+	/**
+	 * Builds the hidden notice reconciling the eval-hosted tools the model knows
+	 * with the live set. MCP servers usually connect after the first prompt is
+	 * built, and hosted tools never enter the tool schema, so without this the
+	 * model only finds them by calling `toolInfo()`.
+	 *
+	 * Known tools are the committed base snapshot, then every hosted-tools notice
+	 * still in context, applied in order — mirroring {@link takeEvalPreludeNotice}.
+	 */
+	takeHostedToolsNotice(): CustomMessage<HostedToolsNoticeDetails> | undefined {
+		const known = new Set(this.#promptSurface.hostedToolNames);
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== HOSTED_TOOLS_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.added) || !Array.isArray(details.removed)) continue;
+			for (const name of details.added) if (typeof name === "string") known.add(name);
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const added = [...this.#evalHostedToolNames].filter(name => !known.has(name));
+		const removed = [...known].filter(name => !this.#evalHostedToolNames.has(name));
+		if (added.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: HOSTED_TOOLS_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(hostedToolsNoticePrompt, {
+				added: added.map(name => ({
+					name,
+					summary: this.#toolRegistry.get(name)?.description.trim().split("\n", 1)[0] ?? "",
+				})),
+				removed,
+			}),
+			details: { added, removed },
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),

@@ -2448,6 +2448,7 @@ export class AgentSession implements SettingsScope {
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
+			evalHostedToolNames: config.evalHostedToolNames,
 			setActiveToolNames: config.setActiveToolNames,
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
@@ -8948,7 +8949,8 @@ export class AgentSession implements SettingsScope {
 				: undefined;
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+			const hostedToolsNotice = isUserQueuedMessage(message) ? this.#tools.takeHostedToolsNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || hostedToolsNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -8956,6 +8958,7 @@ export class AgentSession implements SettingsScope {
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
+					...(hostedToolsNotice ? [hostedToolsNotice] : []),
 				);
 			}
 
